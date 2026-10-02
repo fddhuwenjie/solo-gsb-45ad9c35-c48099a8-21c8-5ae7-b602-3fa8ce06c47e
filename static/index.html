@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>事故复盘因果图</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⟳</span>
+      <span>事故复盘因果图</span>
+      <span class="ver-badge" id="versionBadge">v-</span>
+    </div>
+    <div class="commit-area">
+      <span class="dirty-count" id="dirtyCount"></span>
+      <input type="text" id="commitMessage" maxlength="200" placeholder="本次修改说明（必填）" />
+      <button id="btnCommit" class="btn btn-primary" disabled>提交一组修改（事务）</button>
+      <button id="btnDiscard" class="btn" disabled>放弃修改</button>
+    </div>
+  </header>
+
+  <div class="banner-error" id="errorBanner" hidden>
+    <span id="errorText"></span>
+    <button class="banner-close" id="btnCloseError">×</button>
+  </div>
+  <div class="banner-viewing" id="viewBanner" hidden>
+    <span id="viewBannerText"></span>
+    <button class="btn btn-small" id="btnBackToCurrent">返回当前版</button>
+    <button class="btn btn-small btn-primary" id="btnBackToMerge" hidden>返回裁决</button>
+    <button class="btn btn-small btn-warn" id="btnRollbackView">以此版本回滚</button>
+  </div>
+
+  <main class="layout">
+    <section class="canvas-wrap" id="canvasWrap">
+      <svg id="svg" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#7dd3fc" />
+          </marker>
+          <marker id="arrow-evidence" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24" />
+          </marker>
+          <marker id="arrow-refutes" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb7185" />
+          </marker>
+          <marker id="arrow-affected" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#4ade80" />
+          </marker>
+          <marker id="arrow-conflict" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171" />
+          </marker>
+          <marker id="arrow-tree" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#c084fc" />
+          </marker>
+        </defs>
+        <g id="viewport">
+          <g id="edgeLayer"></g>
+          <g id="tempLayer"></g>
+          <g id="nodeLayer"></g>
+        </g>
+      </svg>
+
+      <div class="canvas-toolbar">
+        <button class="btn btn-small" id="btnZoomIn">＋</button>
+        <button class="btn btn-small" id="btnZoomOut">－</button>
+        <button class="btn btn-small" id="btnZoomReset">复位视图</button>
+      </div>
+      <div class="hint">拖拽节点移动 · 从节点右侧圆点拖出连线 · 拖空白处平移 · 滚轮缩放 · Delete 删除选中元素</div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="panel" id="addPanel">
+        <h3>录入</h3>
+        <div class="seg">
+          <button class="seg-btn active" data-add="event">＋ 事件</button>
+          <button class="seg-btn" data-add="evidence">＋ 证据</button>
+        </div>
+        <input type="text" id="newTitle" maxlength="200" placeholder="标题，如：数据库连接池耗尽" />
+        <textarea id="newDesc" rows="2" placeholder="描述 / 证据材料（可选）"></textarea>
+        <div id="evidenceFields">
+          <div class="ev-field-row">
+            <input type="number" id="newReliability" min="0" max="1" step="0.05" value="0.5" title="证据可靠度 0~1" />
+            <input type="text" id="newSourceGroup" maxlength="100" placeholder="来源组（留空为独立来源）" />
+          </div>
+        </div>
+        <button class="btn btn-primary btn-block" id="btnAddNode">添加到画布</button>
+        <p class="panel-note" id="addNote">事件 → 事件：因果（causes，源事件不晚于目标事件）<br/>证据 → 事件：支持（supports，可在连线详情切换为反驳 refutes）<br/>证据可填可靠度（0~1）与来源组；同组每方向只计最高可靠度一条<br/>事件可在详情中填写带时区的发生时间窗</p>
+      </div>
+
+      <div class="panel" id="detailPanel">
+        <h3 id="detailTitle">未选中元素</h3>
+        <div id="detailBody"><p class="muted">点击节点或连线查看详情，可编辑标题/描述/标签。</p></div>
+      </div>
+
+      <div class="panel" id="impactPanel">
+        <h3>下游影响重算</h3>
+        <p class="muted small">沿因果与支持边向下 BFS 分层，重算指定节点的全部下游。</p>
+        <div id="impactBody"><p class="muted">选中一个节点后点击「重算下游影响」。</p></div>
+      </div>
+
+      <div class="panel" id="sandboxPanel">
+        <h3>反事实干预沙盘</h3>
+        <p class="muted small">
+          勾选多个被阻止事件（干预点）并指定观察目标，系统按拓扑顺序推演
+          prevented / still_active。<b>只读</b>，不产生 changeset 或版本。
+          事件触发模式：<b>ANY</b>=任一前因发生即触发；<b>ALL</b>=全部前因均发生才触发；无前因的事件默认发生。
+        </p>
+        <div class="detail-row">
+          <label>观察目标（事件）</label>
+          <select id="sandboxTarget"></select>
+        </div>
+        <div class="detail-row">
+          <label>被阻止事件（可多选 = 干预点）</label>
+          <div id="sandboxPrevented" class="sandbox-checklist"></div>
+        </div>
+        <div class="sandbox-actions">
+          <button class="btn btn-small" id="btnSandboxRun">推演</button>
+          <button class="btn btn-small" id="btnSandboxClear">清空干预</button>
+        </div>
+        <div id="sandboxResult"><p class="muted small">选择目标并勾选干预点后即时推演；未提交工作图即时生效。</p></div>
+        <div class="sandbox-legend small">
+          <span><i class="lg intervention"></i>干预点</span>
+          <span><i class="lg prevented"></i>被阻止</span>
+          <span><i class="lg tree"></i>依据树</span>
+        </div>
+      </div>
+
+      <div class="panel" id="packagePanel">
+        <h3>可复算复盘结论包</h3>
+        <p class="muted small">
+          导出一个事件的<b>自包含结论包</b>：该事件、全部 causes 祖先与关联 supports/refutes 证据，
+          连同版本元数据、按包内子图重算的有效时间窗与证据审查结果，并附 SHA-256 摘要。
+          上传结论包文件可<b>只读核验</b>：先校验摘要，再仅凭包内原始节点与连线重建 DAG
+          重算并逐字段比对。<b>导出与核验均不写库、不生成版本。</b>
+        </p>
+        <div class="detail-row">
+          <label>根事件（导出基于服务端版本）</label>
+          <select id="pkgEvent"></select>
+        </div>
+        <div class="muted small" id="pkgBasis"></div>
+        <div class="sandbox-actions">
+          <button class="btn btn-small" id="btnPkgExport">导出结论包</button>
+          <button class="btn btn-small" id="btnPkgVerify">上传核验…</button>
+          <input type="file" id="pkgFile" accept=".json,application/json" hidden />
+        </div>
+        <div id="pkgResult"><p class="muted small">尚未导出 / 核验。核验仅针对上传文件，不改变当前工作图。</p></div>
+      </div>
+
+      <div class="panel" id="reviewPanel">
+        <h3>根因共识盲评</h3>
+        <p class="muted small">
+          绑定某个<b>不可变版本</b>，选取 3~20 个事件作为候选，登记唯一评审人并设置最低票数。
+          封榜前只公开已提交名单与数量，不泄露任何排序；封榜（校验 session_revision）后按
+          <b>Schulze 法</b>计票并公开全部选票。<b>不改写</b>因果图、版本或结论包。
+        </p>
+        <div class="sandbox-actions">
+          <button class="btn btn-small" id="btnReviewNew">新建评审场</button>
+          <button class="btn btn-small" id="btnReviewRefresh">刷新</button>
+        </div>
+        <div id="reviewCreate" hidden>
+          <input type="text" id="rvTitle" maxlength="200" placeholder="评审场名称，如：支付故障根因排序" />
+          <div class="detail-row">
+            <label>绑定版本（不可变快照）</label>
+            <select id="rvVersion"></select>
+          </div>
+          <div class="detail-row">
+            <label>候选事件（勾选 3~20 个）</label>
+            <div id="rvCandidates" class="sandbox-checklist review-candidates"></div>
+          </div>
+          <div class="detail-row">
+            <label>评审人（每行一个，须唯一）</label>
+            <textarea id="rvReviewers" rows="3" placeholder="alice&#10;bob&#10;carol"></textarea>
+          </div>
+          <div class="detail-row">
+            <label>最低票数（达到才允许封榜）</label>
+            <input type="number" id="rvMinVotes" min="1" value="2" />
+          </div>
+          <button class="btn btn-primary btn-block" id="btnReviewCreate">创建评审场</button>
+          <p class="muted small" id="rvCreateMsg"></p>
+        </div>
+        <ul class="review-list" id="reviewList"></ul>
+      </div>
+
+      <div class="panel" id="nodeMergePanel">
+        <h3>重复事件归并</h3>
+        <p class="muted small">
+          在<b>当前工作图</b>选择一个<b>保留事件</b>与一个或多个<b>同一事故的重复事件</b>：
+          先预览将被重接的 causes、supports / refutes 连线与字段冲突（标题 / 描述 / 时间窗 /
+          trigger_mode 必须逐项明确取值），再确认归并。候选互为祖先、迁移后自环 / 成环、
+          时间窗无交集、ALL 节点前因会丢失都会被整次拒绝。<b>未提交 changeset 不会混入归并</b>，
+          确认后生成一个不可变的新版本。
+        </p>
+        <div class="detail-row">
+          <label>保留事件（归并后保留该节点）</label>
+          <select id="nmKeep"></select>
+        </div>
+        <div class="detail-row">
+          <label>重复事件（可多选，须与保留事件无祖先关系）</label>
+          <div id="nmDups" class="sandbox-checklist"></div>
+        </div>
+        <button class="btn btn-small btn-primary btn-block" id="btnNmPreview">预览归并（只读）</button>
+        <p class="muted small" id="nmHint"></p>
+      </div>
+
+      <div class="panel" id="proposalPanel">
+        <h3>变更提案合并</h3>        <p class="muted small">
+          把未提交修改保存为<b>绑定基线版本</b>的提案：保存时只在对应基线上复用整图校验，
+          <b>不生成版本</b>。勾选两份<b>同基线、未合并</b>的提案做三方比较：
+          单侧修改与双方相同修改直接采纳；同字段改成不同值、删除与修改相遇列为冲突，
+          逐项裁决（A / B / 基线 / 丢弃）后服务端在写事务中重合并并重跑成环、时间窗等校验，
+          全通过才生成一个<b>合并版本</b>并同时标记两份提案已合并。
+        </p>
+        <div class="detail-row">
+          <input type="text" id="ppTitle" maxlength="200" placeholder="提案标题，如：A 组补充监控证据" />
+        </div>
+        <div class="sandbox-actions">
+          <button class="btn btn-small btn-primary" id="btnPpSave">保存当前修改为提案</button>
+          <button class="btn btn-small" id="btnPpRefresh">刷新</button>
+        </div>
+        <button class="btn btn-small btn-block" id="btnPpMerge" disabled>勾选两份提案后比较（已选 0/2）</button>
+        <p class="muted small" id="ppSaveMsg"></p>
+        <ul class="review-list" id="proposalList"></ul>
+      </div>
+
+      <div class="panel panel-grow" id="versionsPanel">
+        <h3>版本快照</h3>
+        <button class="btn btn-small btn-refresh" id="btnRefreshVersions">刷新</button>
+        <ul class="version-list" id="versionList"></ul>
+      </div>
+    </aside>
+  </main>
+
+  <div class="review-modal" id="reviewModal" hidden>
+    <div class="review-dialog">
+      <header class="review-head">
+        <span id="reviewModalTitle">评审场</span>
+        <button class="banner-close" id="btnReviewClose">×</button>
+      </header>
+      <div class="review-meta" id="reviewMeta"></div>
+      <div class="seg review-tabs">
+        <button class="seg-btn" data-rtab="vote">投票</button>
+        <button class="seg-btn" data-rtab="ranks">名次</button>
+        <button class="seg-btn" data-rtab="matrix">两两矩阵</button>
+        <button class="seg-btn" data-rtab="issuance">签发</button>
+      </div>
+      <div class="review-body" id="reviewBody"></div>
+    </div>
+  </div>
+
+  <div class="review-modal" id="mergeModal" hidden>
+    <div class="review-dialog merge-dialog">
+      <header class="review-head">
+        <span id="mergeModalTitle">三方合并裁决</span>
+        <button class="banner-close" id="btnMergeClose">×</button>
+      </header>
+      <div class="review-meta" id="mergeMeta"></div>
+      <div class="merge-warnings" id="mergeWarnings"></div>
+      <div class="merge-columns">
+        <div class="merge-col">
+          <div class="window-title">自动采纳（<span id="mergeAutoCount">0</span>）</div>
+          <div id="mergeAuto" class="merge-list"></div>
+        </div>
+        <div class="merge-col">
+          <div class="window-title">冲突裁决（<span id="mergeConflictCount">0</span>，逐项必选）</div>
+          <div id="mergeConflicts" class="merge-list"></div>
+        </div>
+      </div>
+      <div class="merge-footer">
+        <input type="text" id="mergeMessage" maxlength="200" placeholder="合并版本说明（必填）" />
+        <div class="sandbox-actions" style="margin-bottom:0">
+          <button class="btn btn-small" id="btnMergePreview">预览合并结果</button>
+          <button class="btn btn-small btn-primary" id="btnMergeCommit">裁决并生成合并版本</button>
+        </div>
+        <p class="muted small" id="mergeMsg"></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="review-modal" id="nodeMergeModal" hidden>
+    <div class="review-dialog merge-dialog">
+      <header class="review-head">
+        <span id="nodeMergeModalTitle">重复事件归并预览</span>
+        <button class="banner-close" id="btnNodeMergeClose">×</button>
+      </header>
+      <div class="review-meta" id="nodeMergeMeta"></div>
+      <div class="merge-warnings" id="nodeMergeBlockers"></div>
+      <div class="merge-columns">
+        <div class="merge-col">
+          <div class="window-title">连线迁移（causes / 证据边）</div>
+          <div id="nodeMergeMoves" class="merge-list"></div>
+        </div>
+        <div class="merge-col">
+          <div class="window-title">字段冲突（<span id="nodeMergeConflictCount">0</span> 项，逐项必选）</div>
+          <div id="nodeMergeConflicts" class="merge-list"></div>
+        </div>
+      </div>
+      <div class="merge-footer">
+        <input type="text" id="nodeMergeMessage" maxlength="200" placeholder="归并版本说明（必填）" />
+        <div class="sandbox-actions" style="margin-bottom:0">
+          <button class="btn btn-small" id="btnNodeMergeLocateBlocker">定位首个冲突路径</button>
+          <button class="btn btn-small btn-primary" id="btnNodeMergeCommit">确认归并并生成新版本</button>
+        </div>
+        <p class="muted small" id="nodeMergeMsg"></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
