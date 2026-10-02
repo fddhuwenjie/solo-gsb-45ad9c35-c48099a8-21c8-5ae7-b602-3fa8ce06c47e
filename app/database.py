@@ -133,6 +133,42 @@ BEFORE DELETE ON root_cause_issuances
 BEGIN
     SELECT RAISE(ABORT, 'root_cause_issuances 为只追加表，签发记录不可删除');
 END;
+
+-- 签发有效性复核：对已存在的不可变签发记录在某个目标版本上按原规则重算的结果。
+-- 表同样为只追加（UPDATE / DELETE 触发器直接拒绝）；同一签发 + 同一目标版本至多
+-- 一条（UNIQUE 约束），重复复核返回 409 且绝不覆盖旧记录。记录自带规范化报告与
+-- SHA-256 摘要；无论复核结论 valid / invalid 都留痕。只追加本表，不改写图 / 评审 /
+-- 签发记录 / 历史快照。
+CREATE TABLE IF NOT EXISTS issuance_revalidations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    issuance_id         INTEGER NOT NULL REFERENCES root_cause_issuances(id),
+    session_id          INTEGER NOT NULL REFERENCES review_sessions(id),
+    bound_version_id    INTEGER NOT NULL REFERENCES versions(id),   -- 签发时绑定版本
+    target_version_id   INTEGER NOT NULL REFERENCES versions(id),   -- 本次复核的目标版本
+    note                TEXT NOT NULL DEFAULT '',                   -- 复核说明（可空）
+    result              TEXT NOT NULL CHECK (result IN ('valid', 'invalid')),
+    violation_count     INTEGER NOT NULL DEFAULT 0,
+    report_json         TEXT NOT NULL CHECK (json_valid(report_json)),  -- 规范化复核报告（紧凑、键排序）
+    digest_algorithm    TEXT NOT NULL,
+    digest              TEXT NOT NULL,                              -- report 规范化 JSON 的 SHA-256
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (issuance_id, target_version_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_revalidation_issuance ON issuance_revalidations(issuance_id);
+CREATE INDEX IF NOT EXISTS idx_revalidation_target ON issuance_revalidations(target_version_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_issuance_revalidation_no_update
+BEFORE UPDATE ON issuance_revalidations
+BEGIN
+    SELECT RAISE(ABORT, 'issuance_revalidations 为只追加表，复核记录不可修改');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_issuance_revalidation_no_delete
+BEFORE DELETE ON issuance_revalidations
+BEGIN
+    SELECT RAISE(ABORT, 'issuance_revalidations 为只追加表，复核记录不可删除');
+END;
 """
 
 # (id, type, title, desc, x, y, earliest_time_utc, latest_time_utc, reliability, source_group, trigger_mode)

@@ -11,11 +11,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app import conclusion, database, graph, issuance, node_merge, proposals, review
+from app import conclusion, database, graph, issuance, node_merge, proposals, revalidation, review
 from app.schemas import (
     CommitRequest,
     CounterfactualRequest,
     IssuanceIssueRequest,
+    IssuanceRevalidationRequest,
     IssuanceValidateRequest,
     MergeCommitRequest,
     MergePreviewRequest,
@@ -86,6 +87,15 @@ async def issuance_error_handler(request: Request, exc: issuance.IssuanceError) 
         content={"detail": exc.message, "code": exc.code,
                  "violations": exc.report["violations"] if exc.report else None,
                  "report": exc.report},
+    )
+
+
+@app.exception_handler(revalidation.RevalidationError)
+async def revalidation_error_handler(request: Request, exc: revalidation.RevalidationError) -> JSONResponse:
+    # 重复复核（不得覆盖旧记录）为 409；签发 / 版本不存在为 404
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message, "code": exc.code, "report": exc.report},
     )
 
 
@@ -337,6 +347,38 @@ def download_root_cause_issuance(session_id: int, conn: sqlite3.Connection = Dep
     )
 
 
+# ---------- 签发有效性复核（不可变签发记录 × 目标版本；只追加，重复复核不覆盖） ----------
+
+@app.post("/api/issuances/{issuance_id}/revalidations", status_code=201)
+def create_issuance_revalidation(issuance_id: int, body: IssuanceRevalidationRequest,
+                                 conn: sqlite3.Connection = Depends(get_conn)):
+    """对一条不可变签发记录在目标版本上做有效性复核：单个 SQLite 写事务内加载
+    签发时绑定版本、签发 payload 与目标整图，按原规则重新计算 Schulze 最高并列、
+    causes 祖先关系、证据强度与时间窗；逐项失效原因（稳定顺序、附见证路径）与
+    相对签发版的节点 / 证据 / 时间窗变化随报告写入只追加记录。
+    同一签发 + 同一目标版本重复复核返回 409，绝不覆盖旧记录。"""
+    return revalidation.create_revalidation(
+        conn,
+        issuance_id,
+        target_version_id=body.target_version_id,
+        note=body.note,
+    )
+
+
+@app.get("/api/issuances/{issuance_id}/revalidations")
+def list_issuance_revalidations(issuance_id: int,
+                                conn: sqlite3.Connection = Depends(get_conn)):
+    """列出某条不可变签发记录的全部复核结果（按复核先后；只追加，旧记录恒在）。"""
+    return revalidation.list_for_issuance(conn, issuance_id)
+
+
+@app.get("/api/revalidations/{revalidation_id}")
+def get_issuance_revalidation(revalidation_id: int,
+                              conn: sqlite3.Connection = Depends(get_conn)):
+    """读取单条复核记录（含规范化报告与 SHA-256；不存在返回 404）。"""
+    return revalidation.get_revalidation(conn, revalidation_id)
+
+
 # ---------- 提交一组修改（事务：校验整张图，任一失败全部拒绝） ----------
 
 @app.post("/api/changes/commit", response_model_exclude_none=True)
@@ -479,3 +521,8 @@ def node_merge_commit(body: NodeMergeCommitRequest, conn: sqlite3.Connection = D
 # 静态前端（API 路由先注册，未匹配的路径交给 StaticFiles）
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+
+# 路由索引（见 README「HTTP API」）：图状态 / 版本 / 回滚 / 下游、反事实沙盘、
+# 结论包导出核验、盲评建场投票封榜、根因签发预检/签发/下载、
+# 签发有效性复核（/api/issuances/{id}/revalidations、/api/revalidations/{id}）、
+# 提案合并、重复事件归并。
