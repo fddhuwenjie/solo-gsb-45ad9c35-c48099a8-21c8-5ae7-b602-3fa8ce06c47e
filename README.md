@@ -32,6 +32,13 @@ still_active，并给出目标的递归依据树。**可复算复盘结论包**�
 insufficient 或 refuted；任一不满足都逐项拒绝。通过后写入**不可修改**的签发记录
 （只追加触发器禁止 UPDATE/DELETE），保存规范化结论 payload 与 SHA-256 摘要并关联评审场
 与版本；同场不可重复签发，后续图版本变化不影响记录。
+**签发有效性复核**：针对一条不可变签发记录与用户指定的目标版本，服务端在单个 SQLite
+写事务中加载签发时绑定版本、签发 payload 与目标整图，按原规则重新计算 Schulze 最高并列
+（目标版本中仍在的候选上重算）、causes 祖先关系、证据强度与时间窗；目标版本缺失任一根因、
+候选出现祖先关系、证据变为 insufficient/refuted、时间窗冲突或评审候选/版本不一致时，
+按稳定顺序返回逐项失效原因与见证路径；全部条件仍满足才标记有效，并展示相对签发版的节点、
+证据与时间窗变化。复核结果同样写入只追加的不可变记录（规范化报告 + SHA-256），
+同一签发与目标版本重复复核返回 409、绝不覆盖旧记录。
 
 ## ✨ 功能特性
 
@@ -123,6 +130,27 @@ insufficient 或 refuted；任一不满足都逐项拒绝。通过后写入**不
   - **只读预检与展示**：`POST …/issuance/validate` 复用同一套逐项校验返回结构化检查结果
     （不写库）；前端「评审室 → 签发」页展示校验结果、逐项失败原因、候选明细与已签发记录，
     并可下载含 digest 的签发文件
+- **签发有效性复核（Issuance Validity Recheck）**
+  - **按原规则复核**：选择一条不可变签发记录与一个目标版本，服务端在**同一个 SQLite 写事务**
+    （`BEGIN IMMEDIATE`）中加载签发时绑定版本快照、签发 payload 与目标版本整图，并由评审场
+    **冻结选票**重新计算 Schulze 最高并列（在目标版本中仍存在且仍为事件的候选上重算；
+    已删除 / 改类别的候选单列「评审候选 / 版本不一致」失效项）
+  - **逐项失效原因（稳定顺序 + 见证路径）**：签发记录与 payload / 评审场绑定版本不一致、
+    目标版本缺失任一签发根因（或不再是事件）、评审候选与目标版本不一致、签发集合不再
+    恰好覆盖重算的最高并列名次、根因之间在目标版本上出现 causes 祖先关系（附按 id 升序
+    DFS 的确定性 `witness_path`）、某个根因证据变为 insufficient / refuted（附 S/R）、
+    目标版本整图时间窗传播冲突（附因果链节点 / 边）—— `violations` 按固定代码顺序、
+    同代码按节点 / 节点对排序，逐条给出中文原因
+  - **相对签发版的变化**：`changes` 给出整图节点 / 连线增删，以及每个根因相对签发版的
+    节点字段变化（标题 / 描述 / 位置 / 时间窗 / trigger_mode）、证据变化（状态迁移、
+    S/R 分值、入选与同源未计权证据的增减）与有效时间窗逐项变化（上下界、收紧来源、传播链）
+  - **全部条件仍满足**才标记 `status="valid"`，否则 `"invalid"`；**有效与无效结果都落库**
+  - **不可变、不覆盖**：结果写入 `root_cause_issuance_rechecks`（**只追加**：触发器禁止
+    UPDATE/DELETE），报告为规范化 JSON（键字典序、紧凑、整数值浮点规范化）并附 SHA-256；
+    `UNIQUE(issuance_id, target_version_id)` 兜底：同一签发对同一目标版本重复复核返回
+    **409** `recheck_already_exists`，旧记录绝不被覆盖
+  - 复核只追加新表行，**不改写**因果图、评审、签发记录或任何历史快照；
+    列表 `GET /api/issuances/{id}/rechecks`（倒序），详情 `GET …/rechecks/{rid}`
 - **变更提案合并（Change Proposal Merge）**
   - **保存提案**：把画布上的未提交修改（changeset）保存为绑定 `base_version_id` 的提案；
     保存时在写事务内把修改应用到**对应基线**上，复用与普通提交完全相同的整图校验
@@ -216,6 +244,9 @@ SQLite 数据库默认位于 `./data/app.db`，可用环境变量 `DB_PATH` 覆�
 | POST | `/api/reviews/{id}/issuance` | 签发不可变根因结论（写事务内重读并逐项校验；失败逐项拒绝，同场重复 409） |
 | GET | `/api/reviews/{id}/issuance` | 读取签发记录（含规范化 payload 与 SHA-256；不存在 404） |
 | GET | `/api/reviews/{id}/issuance/download` | 下载含 digest 的签发文件（规范化 JSON） |
+| POST | `/api/issuances/{id}/recheck` | 对不可变签发记录 × 目标版本做有效性复核（写事务重算；逐项失效原因+见证+变化；同一对重复 409） |
+| GET | `/api/issuances/{id}/rechecks` | 列出一条签发记录的全部复核记录（摘要，倒序） |
+| GET | `/api/issuances/{id}/rechecks/{rid}` | 读取单条复核记录（含规范化报告与 SHA-256；不存在 404） |
 | GET | `/api/proposals` | 变更提案列表（含未合并 / 已合并、基线、修改项数） |
 | POST | `/api/proposals` | 保存提案（绑定 `base_version_id` 的 changeset，基线整图校验，**不生成版本**） |
 | GET | `/api/proposals/{id}` | 提案详情（含所存 changeset） |
@@ -706,6 +737,118 @@ curl -X POST http://localhost:8000/api/reviews/1/issuance \
 签发后该页以只读形式展示最终根因、签发说明、摘要、候选状态快照与下载入口，
 评审场列表与详情会出现「已签发 🔒」标记。
 
+### 签发有效性复核示例
+
+签发记录是**不可变**的，但图在后续归并、编辑或回滚后会产生新版本，原结论可能不再成立。
+对一条签发记录（路径参数为签发记录 `id`，可从签发响应或评审场详情获得）与目标版本发起复核：
+
+```bash
+curl -X POST http://localhost:8000/api/issuances/1/recheck \
+  -H 'Content-Type: application/json' \
+  -d '{"target_version_id": 3, "note": "节点归并后复核签发结论"}'
+```
+
+服务端在**单个 SQLite 写事务**中加载签发时绑定版本快照、签发 payload 与 v3 整图，
+由评审场冻结选票重新计算 Schulze 最高并列，并在目标版本上重算 causes 祖先关系、
+证据强度与有效时间窗。全部条件仍满足时返回 201、`status="valid"`（节选）：
+
+```json
+{
+  "id": 2, "issuance_id": 1, "target_version_id": 3, "status": "valid", "valid": true,
+  "violation_count": 0, "checked_at": "2026-10-02T09:00:00Z",
+  "digest_algorithm": "sha256", "digest": "f1885318…",
+  "root_cause_node_ids": ["n-null"],
+  "report": {
+    "checks": {
+      "issuance_bound_version_consistent": true,
+      "roots_present_in_target": true,
+      "review_candidates_consistent": true,
+      "covers_top_rank_exactly": true,
+      "no_candidate_ancestor_relation": true,
+      "evidence_admissible": true,
+      "time_window_ok": true
+    },
+    "violations": [],
+    "changes": {
+      "graph": {"issued": {"node_count": 10, "edge_count": 9},
+                "target": {"node_count": 11, "edge_count": 10}},
+      "nodes_added": [{"id": "e-cfg2", "type": "evidence", "title": "配置变更确认单"}],
+      "nodes_removed": [],
+      "edges_added": [{"id": "e12", "kind": "supports", "source_id": "e-cfg2",
+                       "target_id": "n-config", "label": "开关确实被改"}],
+      "edges_removed": [],
+      "root_nodes": {"n-null": {"present": true, "field_changes": [ ]}},
+      "root_evidence": {"n-null": {"status_change": null, "score_changes": [],
+                                   "selected_added": [], "selected_removed": []}},
+      "root_time_windows": {"n-null": {"field_changes": [
+        {"field": "effective_lower",
+         "issued_value": "2026-09-20T02:00:30Z", "target_value": "2026-09-20T02:00:45Z"}]}}
+    }
+  }
+}
+```
+
+任一条件不满足仍返回 201 并落库，`status="invalid"`、`violations` 按**稳定顺序**逐项列出
+代码、原因与见证路径（`witness_path` 为 causes 节点链；时间窗冲突另附 `witness_edge_ids`）。
+例如目标版本中两个根因被新的 causes 边连通：
+
+```json
+{
+  "status": "invalid", "valid": false, "violation_count": 1,
+  "report": {
+    "violations": [
+      {"code": "candidate_ancestor_relation",
+       "ancestor_node_id": "n-config", "descendant_node_id": "n-code",
+       "ancestor_title": "配置开关失效", "descendant_title": "错误版本发布",
+       "witness_path": ["n-config", "n-code"],
+       "message": "目标版本中「配置开关失效」成为「错误版本发布」的 causes 祖先，根因之间不得存在因果祖先关系"}
+    ]
+  }
+}
+```
+
+逐项失效原因代码（`violations[]` 按此代码顺序、同代码按节点 / 节点对排序）：
+
+| `violations[].code` | 触发条件 | 见证 |
+| --- | --- | --- |
+| `issuance_bound_version_mismatch` | 签发记录 / payload / 评审场三处绑定版本不一致 | 三个版本 id |
+| `root_missing_in_target` | 某签发根因在目标版本中已被删除 / 归并 | `witness_path: [node]` |
+| `root_not_event_in_target` | 某签发根因在目标版本中不再是事件节点 | `target_type` |
+| `review_candidate_missing_in_target` | 评审候选在目标版本中缺失（候选 / 版本不一致） | `witness_path: [node]` |
+| `review_candidate_not_event_in_target` | 评审候选在目标版本中不再是事件节点 | `target_type` |
+| `schulze_top_rank_mismatch` | 冻结选票在「目标版本仍在的候选」上重算后，签发集合不再恰好覆盖最高并列名次 | 缺项 / 多项 / 最高并列 id 列表 |
+| `candidate_ancestor_relation` | 两个根因在目标版本上出现 causes 祖先关系 | `witness_path`（按 id 升序 DFS） |
+| `evidence_not_admissible` | 某根因证据状态变为 insufficient 或 refuted | S/R 分值，`witness_path: [node]` |
+| `time_window_conflict` | 目标版本整图有效时间窗传播冲突 | 冲突链 `witness_path` + `witness_edge_ids` |
+
+- Schulze 在目标版本中**仍存在且仍为事件**的候选上由冻结选票重算；被删除 / 改类别的候选
+  不再参与计票（两两偏好只看相对先后，剔除候选不影响其余候选间的比较），并由
+  `review_candidate_*` 失效项单独报告。
+- `changes` 展示**相对签发版**的差异：整图 `nodes_added/removed`、`edges_added/removed`；
+  每个根因的 `root_nodes`（节点字段）、`root_evidence`（证据状态迁移、S/R、入选 /
+  同源未计权证据增减）、`root_time_windows`（上下界 / 收紧来源 / 传播链逐项）。
+- 结果为**只追加**记录：`root_cause_issuance_rechecks` 上的触发器禁止 UPDATE/DELETE；
+  `UNIQUE(issuance_id, target_version_id)` 保证同一签发对同一目标版本至多一条 ——
+  重复复核（无论上次是 valid 还是 invalid）返回 **409**，绝不覆盖：
+
+```json
+{ "detail": "签发记录 1 对目标版本 v3 已存在复核记录（#2，invalid），重复复核不得覆盖旧记录",
+  "code": "recheck_already_exists" }
+```
+
+签发记录不存在 / 目标版本不存在返回 404（`issuance_not_found` / `target_version_not_found`）。
+列表与详情：
+
+```bash
+curl http://localhost:8000/api/issuances/1/rechecks          # 全部复核（摘要，倒序）
+curl http://localhost:8000/api/issuances/1/rechecks/2        # 单条（含完整 report）
+```
+
+摘要项含 `status`、`valid`、`violation_count`、`root_cause_node_ids`、`checked_at` 与
+SHA-256；`digest` 可按与签发相同的规范化口径复算
+（`jq -cjS .report file | sha256sum`，对 GET 详情中的 `report` 字段）。
+复核全程只追加新表行，**不改写**因果图、评审、签发记录与任何历史快照。
+
 ### 变更提案合并示例
 
 **保存提案**（不生成版本；`changes` 与普通提交的 changeset 完全同构，必须带
@@ -939,12 +1082,13 @@ curl -X POST http://localhost:8000/api/node-merge/commit \
 ```
 .
 ├── app/
-│   ├── main.py       # FastAPI 路由：提交事务、回滚、下游查询、反事实推演、结论包导出/核验、盲评建场/投票/封榜、根因签发预检/签发/下载、提案合并、重复事件归并、静态托管
+│   ├── main.py       # FastAPI 路由：提交事务、回滚、下游查询、反事实推演、结论包导出/核验、盲评建场/投票/封榜、根因签发预检/签发/下载、签发有效性复核、提案合并、重复事件归并、静态托管
 │   ├── graph.py      # 图加载、changeset 校验（成环检测/证据字段）、时间窗传播、证据强度审查、BFS 下游、反事实拓扑推演、快照持久化
 │   ├── node_merge.py # 重复事件归并：边迁移与同端点连线标签合并、字段冲突、确定性拒绝路径（祖先/自环/环/时间窗无交集/ALL 前因丢失/传播冲突）、写事务生成 merge 版本
 │   ├── conclusion.py # 可复算复盘结论包：自包含 payload 收集、规范化 SHA-256 摘要、上传包重建 DAG 重算并逐字段比对（纯只读）
 │   ├── review.py     # 根因共识盲评：评审场 CRUD（写事务校验 revision/最低票数）、Schulze 计票（两两偏好/最强路径/逐层并列/确定性见证）
 │   ├── issuance.py   # 根因结论签发：写事务内重读绑定版本/Schulze/证据审查/时间窗逐项校验、规范化 payload+SHA-256、只追加签发记录与只读预检
+│   ├── issuance_recheck.py # 签发有效性复核：写事务内加载签发绑定版本/payload/目标整图，按原规则重算 Schulze/祖先/证据/时间窗，逐项失效原因+见证+相对签发版变化，只追加复核记录（不覆盖）
 │   ├── proposals.py  # 变更提案：保存（基线整图校验、不出版本）、三方比较（自动采纳/冲突）、写事务裁决合并（复查状态与基线+重跑整图校验+生成 merge 版本）
 │   ├── database.py   # SQLite 连接、表结构、v1 示例数据、旧库幂等迁移（含 versions.kind 扩展到 merge）
 │   └── schemas.py    # Pydantic 请求/响应模型
@@ -987,6 +1131,16 @@ curl -X POST http://localhost:8000/api/node-merge/commit \
   - **只追加**：表上 `BEFORE UPDATE` / `BEFORE DELETE` 触发器直接 `RAISE(ABORT)`，
     记录写入后不可修改、不可删除；记录绑定的是封榜时的版本 id 且自带 payload，
     后续图版本变化不影响记录
+- 签发有效性复核（只读写 `root_cause_issuance_rechecks` 一张新表，不触碰图数据 / 评审 / 签发）：
+  - `root_cause_issuance_rechecks(id, issuance_id→root_cause_issuances,
+    target_version_id→versions, status[valid|invalid], note, report_json,
+    digest_algorithm, digest, checked_at)`，`UNIQUE(issuance_id, target_version_id)`
+  - `report_json` 为规范化复核报告（紧凑、键按字典序）：逐项 `checks` / `violations`
+    （稳定顺序 + 见证路径）、候选明细与相对签发版的节点 / 证据 / 时间窗变化；
+    `digest` = report 规范化 JSON 的 SHA-256
+  - **只追加**：表上 `BEFORE UPDATE` / `BEFORE DELETE` 触发器直接 `RAISE(ABORT)`；
+    唯一约束兜底：同一签发与目标版本重复复核返回 409，旧记录（valid 或 invalid）
+    **绝不覆盖**
 
 最新版本 = `MAX(versions.id)`；读取图时只查该版本的行。回滚不修改任何旧行，而是把目标版本的
 nodes/edges 复制到一条新的 rollback 版本中，因此历史始终可追溯。提案合并同理：三方裁决结果
@@ -1075,6 +1229,34 @@ nodes/edges 复制到一条新的 rollback 版本中，因此历史始终可追�
    UPDATE/DELETE。整个流程只新增签发表行，**不改写** versions/nodes/edges、review_* 选票
 5. **只读预检** `POST …/issuance/validate` 复用同一个 `evaluate`（不 BEGIN、不写库），
    返回 checks / violations / 候选明细，供前端即时展示
+
+### 签发有效性复核（`issuance_recheck.create_recheck` / `evaluate_recheck`）
+
+1. **同一写事务加载**（`BEGIN IMMEDIATE`）：不可变签发记录行（绑定版本 id / 规范化
+   payload / 摘要）、评审场行与冻结选票、签发时绑定版本整图、目标版本整图；
+   先校验目标版本存在（否则 404），再确认签发记录 / payload / 评审场三者绑定版本一致
+2. **按原规则重算**：
+   - Schulze 最高并列在「目标版本中仍存在且仍为事件」的评审候选上由**冻结选票**现算
+     （剔除缺失候选不改变存活候选间的两两偏好）；签发集合（取自签发 payload 的
+     root_causes）须仍与最高并列**集合相等**
+   - 根因逐一检查在目标版本中存在且为事件；根因两两在目标版本「事件 + causes」子图上
+     不可达（祖先关系复用签发的按 id 升序邻接与确定性见证路径）
+   - 每个现存根因在目标版本上的证据状态 ∈ {supported, disputed}；整图时间窗
+     `compute_time_windows` 传播无冲突（附冲突因果链节点 / 边）
+   - 评审候选在目标版本缺失 / 改类别单列 `review_candidate_*` 失效项
+3. **逐项失效原因（稳定顺序）**：violations 先按固定代码顺序
+   （绑定版本 → 根因缺失/改类别 → 评审候选缺失/改类别 → Schulze 不覆盖 → 祖先关系 →
+   证据 → 时间窗），同代码再按 node_id / (ancestor, descendant) 排序；每条带中文原因
+   与见证路径，供前端逐项定位
+4. **相对签发版变化**：在签发绑定版本与目标版本上分别重算时间窗 / 证据审查，给出整图
+   节点 / 连线增删，以及每个根因的节点字段差异、证据差异（状态迁移、S/R、入选与同源
+   未计权证据按 edge_id 集合比较）、有效时间窗差异（上下界 / 来源 / 传播链）
+5. **写入只追加记录**：报告规范化（键字典序、紧凑 JSON、整数值浮点）后计算 SHA-256，
+   插入 `root_cause_issuance_rechecks`，valid / invalid 都落库；UNIQUE 约束在并发竞争时
+   兜底（捕获 IntegrityError → 409）。任一重复复核返回 409 并 `ROLLBACK`，
+   **旧记录绝不覆盖**；触发器永久禁止 UPDATE/DELETE
+6. 整个流程只新增复核表行，**不改写** versions/nodes/edges、review_* 与
+   root_cause_issuances；原签发、原图、评审与 Docker Compose / 8000 启动方式均不变
 
 ### 变更提案保存与三方合并（`proposals.save_proposal` / `compute_merge` / `commit_merge`）
 

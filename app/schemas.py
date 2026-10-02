@@ -221,6 +221,14 @@ class IssuanceValidateRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=4000)
 
 
+# ---------- 签发有效性复核（不可变签发记录 × 目标版本；只追加复核记录） ----------
+
+class IssuanceRecheckRequest(BaseModel):
+    # 目标版本：复核在写事务内加载签发绑定版本、签发 payload 与该版本整图按原规则重算
+    target_version_id: int = Field(ge=1)
+    note: Optional[str] = Field(default=None, max_length=4000)  # 复核说明（可留空）
+
+
 # ---------- 通用错误 ----------
 
 class ErrorResponse(BaseModel):

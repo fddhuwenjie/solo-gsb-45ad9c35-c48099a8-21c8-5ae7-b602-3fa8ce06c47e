@@ -133,6 +133,38 @@ BEFORE DELETE ON root_cause_issuances
 BEGIN
     SELECT RAISE(ABORT, 'root_cause_issuances 为只追加表，签发记录不可删除');
 END;
+
+-- 签发有效性复核：对一条不可变签发记录与某个目标版本整图按原规则重新复核。
+-- 表为只追加（append-only）：UPDATE / DELETE 由触发器直接拒绝；
+-- 同一签发记录对同一目标版本至多一条复核记录（UNIQUE 兜底，重复复核拒绝而非覆盖）；
+-- 记录自带规范化复核报告与 SHA-256 摘要，原图 / 评审 / 签发记录一律不改写。
+CREATE TABLE IF NOT EXISTS root_cause_issuance_rechecks (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    issuance_id         INTEGER NOT NULL REFERENCES root_cause_issuances(id),
+    target_version_id   INTEGER NOT NULL REFERENCES versions(id),
+    status              TEXT NOT NULL CHECK (status IN ('valid', 'invalid')),
+    note                TEXT NOT NULL DEFAULT '',
+    report_json         TEXT NOT NULL CHECK (json_valid(report_json)),  -- 规范化复核报告（紧凑、键排序）
+    digest_algorithm    TEXT NOT NULL,
+    digest              TEXT NOT NULL,                 -- report 规范化 JSON 的 SHA-256
+    checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (issuance_id, target_version_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_issuance_rechecks_issuance
+    ON root_cause_issuance_rechecks(issuance_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_root_cause_issuance_recheck_no_update
+BEFORE UPDATE ON root_cause_issuance_rechecks
+BEGIN
+    SELECT RAISE(ABORT, 'root_cause_issuance_rechecks 为只追加表，复核记录不可修改');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_root_cause_issuance_recheck_no_delete
+BEFORE DELETE ON root_cause_issuance_rechecks
+BEGIN
+    SELECT RAISE(ABORT, 'root_cause_issuance_rechecks 为只追加表，复核记录不可删除');
+END;
 """
 
 # (id, type, title, desc, x, y, earliest_time_utc, latest_time_utc, reliability, source_group, trigger_mode)

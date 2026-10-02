@@ -11,11 +11,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app import conclusion, database, graph, issuance, node_merge, proposals, review
+from app import conclusion, database, graph, issuance, issuance_recheck, node_merge, proposals, review
 from app.schemas import (
     CommitRequest,
     CounterfactualRequest,
     IssuanceIssueRequest,
+    IssuanceRecheckRequest,
     IssuanceValidateRequest,
     MergeCommitRequest,
     MergePreviewRequest,
@@ -96,6 +97,16 @@ async def node_merge_error_handler(request: Request, exc: node_merge.NodeMergeEr
         status_code=exc.status_code,
         content={"detail": exc.message, "code": exc.code,
                  "blockers": exc.blockers, "cycle": exc.cycle, "conflict": exc.conflict},
+    )
+
+
+@app.exception_handler(issuance_recheck.RecheckError)
+async def recheck_error_handler(request: Request, exc: issuance_recheck.RecheckError) -> JSONResponse:
+    # 重复复核同一签发与目标版本为 409（旧记录不覆盖）；逐项失效原因随 violations / report 返回
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message, "code": exc.code,
+                 "violations": exc.violations, "report": exc.report},
     )
 
 
@@ -335,6 +346,33 @@ def download_root_cause_issuance(session_id: int, conn: sqlite3.Connection = Dep
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ---------- 签发有效性复核（不可变签发记录 × 目标版本；只追加复核记录，不改写图 / 评审 / 签发） ----------
+
+@app.post("/api/issuances/{issuance_id}/recheck", status_code=201)
+def recheck_issuance(issuance_id: int, body: IssuanceRecheckRequest,
+                     conn: sqlite3.Connection = Depends(get_conn)):
+    """对不可变签发记录与目标版本做有效性复核：单个 SQLite 写事务内加载签发时绑定版本、
+    签发 payload 与目标整图，按原规则重算 Schulze 最高并列、causes 祖先关系、证据强度与
+    时间窗；任一失效条件按稳定顺序逐项返回（含见证路径），全部满足才标记 valid，并展示
+    相对签发版的节点 / 证据 / 时间窗变化。结果写入只追加表；同一签发与目标版本重复复核
+    返回 409，不覆盖旧记录。"""
+    return issuance_recheck.create_recheck(
+        conn, issuance_id, target_version_id=body.target_version_id, note=body.note)
+
+
+@app.get("/api/issuances/{issuance_id}/rechecks")
+def list_issuance_rechecks(issuance_id: int, conn: sqlite3.Connection = Depends(get_conn)):
+    """列出一条签发记录的全部复核记录（摘要，按复核 id 倒序）。"""
+    return issuance_recheck.list_rechecks(conn, issuance_id)
+
+
+@app.get("/api/issuances/{issuance_id}/rechecks/{recheck_id}")
+def get_issuance_recheck(issuance_id: int, recheck_id: int,
+                         conn: sqlite3.Connection = Depends(get_conn)):
+    """读取单条复核记录（含规范化复核报告与 SHA-256 摘要）；不存在返回 404。"""
+    return issuance_recheck.get_recheck(conn, issuance_id, recheck_id)
 
 
 # ---------- 提交一组修改（事务：校验整张图，任一失败全部拒绝） ----------
